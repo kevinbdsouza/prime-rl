@@ -92,6 +92,9 @@ def train(config: Config):
     world_info = get_world_info()
     wandb_sample_history = None
 
+    # In-memory deduplication for logging
+    last_logged_step = None
+
     if config.ckpt.clean_rollout_path and config.ckpt.rollout_path is not None:
         logger.info(f"Cleaning rollout path {config.ckpt.rollout_path}")
         shutil.rmtree(config.ckpt.rollout_path, ignore_errors=True)
@@ -232,13 +235,13 @@ def train(config: Config):
 
                     input_ids = batch["input_ids"].to("cuda")
 
-                    per_token_logps = get_logprobs(model, input_ids, batch["position_ids"], config.temperature)
+                    per_token_logps = get_logprobs(model, input_ids, batch["position_ids"], config.data.temperature)
 
                     batch["logprobs"] = per_token_logps.to("cpu")
 
                     if config.kl_coef is not None:
                         logger.debug(f"kl grad_acc_step {grad_acc_step} / {num_grad_acc_steps}, batch: {batch['input_ids'].shape}")
-                        per_token_logps_reference = get_logprobs(model_reference, input_ids, batch["position_ids"], config.temperature)
+                        per_token_logps_reference = get_logprobs(model_reference, input_ids, batch["position_ids"], config.data.temperature)
                         batch["ref_logprobs"] = per_token_logps_reference.to("cpu")
 
                 data.append(batch_packed)
@@ -339,14 +342,14 @@ def train(config: Config):
                     advantages,
                     original_logprobs,
                     loss_mask,
-                    config.temperature,
+                    config.data.temperature,
                     config.grpo_epsilon_low,
                     config.grpo_epsilon_high,
                     config.clamp_log_prob_coef,
                     max_tokens,
                 )
 
-                entropy = entropy_loss(logits, loss_mask, config.temperature, max_tokens)
+                entropy = entropy_loss(logits, loss_mask, config.data.temperature, max_tokens)
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
 
@@ -444,8 +447,10 @@ def train(config: Config):
                 # Filter metrics to only include the ones we want to send to the API
                 metrics = {k: metrics[k] for k in ("step", "seq_lens", "sample_reward", "total_samples")}
 
-                # TODO(Mika): Maybe need to ensure not logging duplicates?
-                monitor.log(metrics)
+                # Deduplicate logging by step
+                if metrics["step"] != last_logged_step:
+                    monitor.log(metrics)
+                    last_logged_step = metrics["step"]
 
             logger.info(log)
 
@@ -459,7 +464,8 @@ def train(config: Config):
                 if world_info.rank == 0:
                     if envs.SHARDCAST_OUTPUT_DIR is not None:
                         logger.info(f"Broadcasting {safetensor_path}")
-                        shardcast.broadcast(safetensor_path)  # TODO: Is this blocking?
+                        # NOTE: shardcast.broadcast is blocking; it will not return until the file is fully sharded and ready for download.
+                        shardcast.broadcast(safetensor_path)
 
                 if len(previous_ckpt_rollout) > config.max_async_level:
                     path_to_delete = previous_ckpt_rollout.pop(0)

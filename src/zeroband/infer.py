@@ -40,6 +40,8 @@ from zeroband.utils.logger import get_logger
 # Global logger
 logger = get_logger("INFER")
 
+WAIT_FOR_CKPT_TIMEOUT = int(os.environ.get("SHARDCAST_CKPT_TIMEOUT", 300))  # default 5 minutes
+
 
 def inference(config: Config):
     # Initialize the logger
@@ -411,3 +413,11 @@ if __name__ == "__main__":
             # SIGTERM is not working, so we use SIGKILL
             os.kill(shardcast_process.pid, signal.SIGKILL)
             shardcast_process.join()
+
+
+def wait_for_checkpoint(path, timeout=WAIT_FOR_CKPT_TIMEOUT):
+    start = time.time()
+    while not path.exists():
+        if time.time() - start > timeout:
+            raise TimeoutError(f"Checkpoint {path} not available after {timeout} seconds")
+        time.sleep(5)

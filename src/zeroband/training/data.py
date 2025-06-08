@@ -28,6 +28,8 @@ class DataConfig(BaseConfig):
 
     ignore_zero_advantages: bool = False  # don't use in local setup
 
+    temperature: float = 0.6  # Sampling temperature for training
+
 
 class DatasetOutput(TypedDict):
     # token level

@@ -71,7 +71,7 @@ class Config(BaseConfig):
 
     gpus_ids: list[int] | None = None
 
-    temperature: float = 0.6  # todo remove this and add this to the data
+    # temperature: float = 0.6  
 
     grpo_epsilon_low: float = 0.2
     grpo_epsilon_high: float = 0.2

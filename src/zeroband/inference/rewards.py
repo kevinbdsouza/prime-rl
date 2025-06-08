@@ -209,16 +209,22 @@ def compute_rewards(
 
         return RewardsResponse(rewards=list(future.result() for future in futures))
     else:
+        protocol = os.getenv("REWARD_PROTOCOL", "https")
         port = os.getenv("REWARD_PORT", 8000)
         remote_auth = os.getenv("REWARD_AUTH", None)
+        verify_ssl_env = os.getenv("REWARD_VERIFY_SSL", "true").lower()
+        verify_ssl = verify_ssl_env == "true"
+        if not verify_ssl:
+            logger.warning("SSL verification is disabled! This is insecure and should not be used in production.")
         if remote_auth is None:
             raise ValueError("Remote URL is set but no authentication token provided. Set the REWARD_AUTH environment variable.")
 
-        # TODO: SSL/HTTPS?
+        url = f"{protocol}://{remote_url}:{port}/compute_rewards"
         response = requests.post(
-            f"http://{remote_url}:{port}/compute_rewards",
+            url,
             data=json.dumps(reward_request.model_dump()),
             headers={"Authorization": f"Bearer {remote_auth}"},
+            verify=verify_ssl,
         )
 
         if response.status_code != 200:
