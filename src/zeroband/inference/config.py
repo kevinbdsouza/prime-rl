@@ -17,6 +17,9 @@ class SamplingParamConfig(BaseConfig):
     logprobs: int = 0  # 0 mean 1 logprob here
     top_k: int = -1
     seed: int | None = None
+    acceptance_strategy: Literal["all", "top_k", "threshold"] = "all"  # default: accept all
+    acceptance_top_k: int = 1  # used if acceptance_strategy == "top_k"
+    acceptance_threshold: float = 0.0  # used if acceptance_strategy == "threshold"
 
 
 class DifficultyFilteringConfig(BaseConfig):

@@ -204,15 +204,10 @@ def inference(config: Config):
 
         # Get batch
         if node_address_int is not None:
-            # TODO: What if we have multiple sample per real step?
-            # Its impossible right now but we need to fix this if accept counter is used.
-
-            # We reseed the generator here to make the sampling reproducible at each step.
-            # This would work even if the node restarts and resumes from the current step.
+            # Support multiple samples per real step with distributed-safe seeding
             generator = np.random.default_rng(node_address_int * current_step_batch_counter + real_step)
             indices = generator.integers(0, len(dataset), problems_per_batch)
         else:
-            # Use modulo to cycle through the dataset instead of terminating
             indices = [(dataset_offset + j) % len(dataset) for j in range(problems_per_batch)]
 
         logger.debug(f"Sampling batch with indices [{' '.join(map(str, indices[:3]))}...{' '.join(map(str, indices[-3:]))}]")
@@ -234,29 +229,66 @@ def inference(config: Config):
         request_outputs = llm.generate(formatted_prompts, sampling_params, use_tqdm=False)
         end_time = time.time()
 
-        # Dropping like this isn't ideal. But in practice, we shouldn't have any prompts that are too long.
+        # Filter out empty completions
         request_outputs = [req for req in request_outputs if len(req.outputs[0].token_ids) > 0]
         if len(request_outputs) != len(prompts):
             logger.warning(f"{len(prompts) - len(request_outputs)} prompts were filtered out because they were too long")
 
+        # Compute rewards for all samples
+        request_rewards = compute_vllm_rewards(request_outputs, verification_infos, task_types, config.rewards)
+
+        # --- Acceptance strategy ---
+        accepted_outputs = []
+        accepted_rewards = []
+        acceptance_metadata = []
+        strategy = sampling_params.acceptance_strategy
+        if strategy == "all":
+            for out, rew in zip(request_outputs, request_rewards):
+                accepted_outputs.append(out)
+                accepted_rewards.append(rew)
+                acceptance_metadata.append({"accepted": True, "score": [r.reward for r in rew.rewards]})
+        elif strategy == "top_k":
+            # Flatten all samples, sort by reward, take top_k
+            flat = [(out, rew, r.reward) for out, rew in zip(request_outputs, request_rewards) for r in rew.rewards]
+            flat.sort(key=lambda x: x[2], reverse=True)
+            for i, (out, rew, score) in enumerate(flat[:sampling_params.acceptance_top_k]):
+                accepted_outputs.append(out)
+                accepted_rewards.append(rew)
+                acceptance_metadata.append({"accepted": True, "score": score})
+        elif strategy == "threshold":
+            for out, rew in zip(request_outputs, request_rewards):
+                max_score = max(r.reward for r in rew.rewards)
+                if max_score >= sampling_params.acceptance_threshold:
+                    accepted_outputs.append(out)
+                    accepted_rewards.append(rew)
+                    acceptance_metadata.append({"accepted": True, "score": max_score})
+                else:
+                    acceptance_metadata.append({"accepted": False, "score": max_score})
+        else:
+            raise ValueError(f"Unknown acceptance strategy: {strategy}")
+
+        # Only keep accepted samples for further processing
+        if not accepted_outputs:
+            logger.warning("No samples accepted in this batch.")
+            continue
+
         # This generates proofs for the remaining sequences that haven't reached max_len.
-        # We call here to give time for the proofs to be generated non-blocking in the background.
         toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
 
         # Compute progress metrics
         batch_problems = len(problems)
-        batch_samples = sum(len(req.outputs) for req in request_outputs)
-        batch_input_tokens = sum(len(req.prompt_token_ids) for req in request_outputs)
-        batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in request_outputs)
+        batch_samples = len(accepted_outputs)
+        batch_input_tokens = sum(len(req.prompt_token_ids) for req in accepted_outputs)
+        batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in accepted_outputs)
         batch_tokens = batch_input_tokens + batch_output_tokens
         total_tokens += batch_tokens
         total_problems += batch_problems
         total_samples += batch_samples
-        logger.info(f"Generated {batch_samples} samples for {batch_problems} problems for step {real_step} in {end_time - start_time:.2f}s")
+        logger.info(f"Generated {batch_samples} accepted samples for {batch_problems} problems for step {real_step} in {end_time - start_time:.2f}s")
 
         # Print example
-        first_prompt = tokenizer.decode(request_outputs[0].prompt_token_ids)
-        first_completion = tokenizer.decode(request_outputs[0].outputs[0].token_ids)
+        first_prompt = tokenizer.decode(accepted_outputs[0].prompt_token_ids)
+        first_completion = tokenizer.decode(accepted_outputs[0].outputs[0].token_ids)
         logger.debug(f"Example: {first_prompt}{first_completion}")
 
         # Log progress metrics
@@ -284,31 +316,24 @@ def inference(config: Config):
         monitor.log(perf_metrics)
 
         # Compute proofs
-        # Note (Jack): Currently, vllm guarantees that seq ids are in the same order as prompts passed to generate.
-        # Generate always adds requests to the engine in the order of the prompts.
-        # And returns them in the sequence they were added.
         toploc_cache.wait_for_proofs()
         proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
         toploc_cache.reset_cache()
 
-        # Compute rewards and advantages
-        start = time.time()
-        request_rewards = compute_vllm_rewards(request_outputs, verification_infos, task_types, config.rewards)
-        logger.info(f"Computed rewards and advantages in {time.time() - start:.2f}s")
-
-        batch_rewards = sum(sum(r.reward for r in req.rewards) for req in request_rewards) / batch_samples
-
+        # Average reward of accepted samples
+        batch_rewards = sum(sum(r.reward for r in rew.rewards) for rew in accepted_rewards) / batch_samples
         monitor.log({"rewards/batch_rewards": batch_rewards})
         logger.info(f"Average reward of the batch: {batch_rewards}")
 
-        # Get parquet table
+        # Get parquet table (add acceptance_metadata if needed)
         table = get_parquet_table(
-            request_outputs,
-            request_rewards,
+            accepted_outputs,
+            accepted_rewards,
             prompts,
             proofs,
             ckpt_step,
             target_lengths,
+            acceptance_metadata=acceptance_metadata,
         )
 
         # Save outputs to parquet file
