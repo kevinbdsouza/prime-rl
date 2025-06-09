@@ -1,9 +1,9 @@
 import argparse
 import logging
 import multiprocessing as mp
+import os
 import time
 from pathlib import Path
-import os
 
 from shardcast import ClientNode
 

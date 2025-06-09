@@ -77,3 +77,15 @@ def test_init_with_invalid_local_rank(local_rank_world_size: tuple[int, int]):
     os.environ["LOCAL_WORLD_SIZE"] = str(world_size)
     with pytest.raises(AssertionError):
         get_world_info()
+
+
+def test_init_with_node_group_sizes():
+    os.environ["RANK"] = "3"
+    os.environ["WORLD_SIZE"] = "7"
+    os.environ["NODE_GROUP_SIZES"] = "2,3,2"
+    world_info = get_world_info()
+    assert world_info.world_size == 7
+    assert world_info.local_world_size == 3
+    assert world_info.local_rank == 1
+    assert world_info.num_nodes == 3
+    assert world_info == get_world_info()

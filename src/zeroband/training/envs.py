@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     WORLD_SIZE: int
     LOCAL_RANK: int
     LOCAL_WORLD_SIZE: int
+    NODE_GROUP_SIZES: list[int] | None
 
 
 _TRAINING_ENV_PARSERS = {
@@ -26,6 +27,7 @@ _TRAINING_ENV_PARSERS = {
     "WORLD_SIZE": int,
     "LOCAL_RANK": int,
     "LOCAL_WORLD_SIZE": int,
+    "NODE_GROUP_SIZES": lambda x: list(map(int, x.split(","))),
     **_BASE_ENV_PARSERS,
 }
 
