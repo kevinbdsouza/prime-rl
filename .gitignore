@@ -1,4 +1,5 @@
 .vscode/*
+prime_env/*
 logs/*
 wandb/*
 wandb_logs/*
